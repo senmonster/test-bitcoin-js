@@ -25,7 +25,9 @@
 		"react": "^18.2.0",
 		"react-dom": "^18.2.0",
 		"regtest-client": "^0.2.1",
-		"tiny-secp256k1": "^2.2.3"
+		"safe-buffer": "^5.2.1",
+		"tiny-secp256k1": "^2.2.3",
+		"vite-plugin-require": "^1.1.14"
 	},
 	"devDependencies": {
 		"@types/bitcore-lib": "^0.15.6",
