@@ -127,6 +127,8 @@ export class InscriptionTool {
 	}
 
 	buildEmptyRevealTx(network: bitcoin.Network, revealOutValue: number, revealFeeRate: number) {
+		const psbt = new Psbt({ network });
+
 		let totalPrevOutputValue = 0;
 		const revealTxs: bitcoin.Transaction[] = [];
 		const mustRevealTxFees: number[] = [];
