@@ -57,7 +57,7 @@ export async function broadcast({
 				},
 			}
 		);
-		return data;
+		return data.data;
 	} catch (error) {
 		console.log(error);
 	}

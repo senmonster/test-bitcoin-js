@@ -1,6 +1,5 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 import * as bitcoin from "./bitcoinjs-lib";
-// import { Psbt as PsbtBase } from "./bitcoinjs-lib/bip174/psbt";
 import { Psbt } from "./bitcoinjs-lib/psbt";
 
 import { base, signUtil } from "@okxweb3/crypto-lib";
@@ -9,6 +8,8 @@ import * as bcrypto from "./bitcoinjs-lib/crypto";
 import { vectorSize } from "./bitcoinjs-lib/transaction";
 import { getAddressType, sign } from "./txBuild";
 import { BIP32Interface } from "bip32";
+import { transactionBytes } from "./txEstimate";
+import { PsbtInput } from "./bitcoinjs-lib/bip174/interfaces";
 
 const schnorr = signUtil.schnorr.secp256k1.schnorr;
 
@@ -78,8 +79,8 @@ const maxStandardTxWeight = 4000000 / 10;
 export class InscriptionTool {
 	network: bitcoin.Network = bitcoin.networks.bitcoin;
 	inscriptionTxCtxDataList: InscriptionTxCtxData[] = [];
-	revealTxs: bitcoin.Transaction[] = [];
-	commitTx: bitcoin.Transaction = new bitcoin.Transaction();
+	revealTxs: Psbt[] = [];
+	commitTx: Psbt = new Psbt();
 	commitTxPrevOutputFetcher: number[] = [];
 	revealTxPrevOutputFetcher: number[] = [];
 	mustCommitTxFee: number = 0;
@@ -120,25 +121,32 @@ export class InscriptionTool {
 		if (insufficient) {
 			return tool;
 		}
-		tool.signCommitTx(request.commitTxPrevOutputList);
+		// tool.signCommitTx(request.commitTxPrevOutputList);
 		tool.completeRevealTx();
 
 		return tool;
 	}
 
 	buildEmptyRevealTx(network: bitcoin.Network, revealOutValue: number, revealFeeRate: number) {
-		const psbt = new Psbt({ network });
-
 		let totalPrevOutputValue = 0;
-		const revealTxs: bitcoin.Transaction[] = [];
+		const revealTxs: Psbt[] = [];
 		const mustRevealTxFees: number[] = [];
 		const commitAddrs: string[] = [];
 		this.inscriptionTxCtxDataList.forEach((inscriptionTxCtxData, i) => {
-			const tx = new bitcoin.Transaction();
+			const tx = new Psbt();
+
 			tx.version = defaultTxVersion;
 
-			tx.addInput(Buffer.alloc(32), i, defaultSequenceNum);
-			tx.addOutput(inscriptionTxCtxData.revealPkScript, revealOutValue);
+			tx.addInput({
+				hash: Buffer.alloc(32),
+				index: i,
+				sequence: defaultSequenceNum,
+			});
+
+			tx.addOutput({
+				script: inscriptionTxCtxData.revealPkScript,
+				value: revealOutValue,
+			});
 
 			const emptySignature = Buffer.alloc(64);
 			const emptyControlBlockWitness = Buffer.alloc(33);
@@ -147,7 +155,9 @@ export class InscriptionTool {
 			txWitness.push(inscriptionTxCtxData.inscriptionScript);
 			txWitness.push(emptyControlBlockWitness);
 			const fee = Math.floor(
-				(tx.byteLength() + Math.floor((vectorSize(txWitness) + 2 + 3) / 4)) * revealFeeRate
+				(tx.extractTransaction().byteLength() +
+					Math.floor((vectorSize(txWitness) + 2 + 3) / 4)) *
+					revealFeeRate
 			);
 
 			const prevOutputValue = revealOutValue + fee;
@@ -179,43 +189,50 @@ export class InscriptionTool {
 	): boolean {
 		let totalSenderAmount = 0;
 
-		const tx = new bitcoin.Transaction();
-		/**
-		 * transaction to psbt
-		 */
-		// const psbtBase = new PsbtBase(tx);
-		// const psbt = new Psbt({}, psbtBase)
+		const tx = new Psbt();
 
 		tx.version = defaultTxVersion;
 
 		commitTxPrevOutputList.forEach((commitTxPrevOutput) => {
 			const hash = base.reverseBuffer(base.fromHex(commitTxPrevOutput.txId));
-			tx.addInput(hash, commitTxPrevOutput.vOut, defaultSequenceNum);
+
+			tx.addInput({
+				hash,
+				index: commitTxPrevOutput.vOut,
+				sequence: defaultSequenceNum,
+			});
+
 			this.commitTxPrevOutputFetcher.push(commitTxPrevOutput.amount);
 			totalSenderAmount += commitTxPrevOutput.amount;
 		});
 
 		this.inscriptionTxCtxDataList.forEach((inscriptionTxCtxData) => {
-			tx.addOutput(
-				inscriptionTxCtxData.revealTxPrevOutput.pkScript,
-				inscriptionTxCtxData.revealTxPrevOutput.value
-			);
+			tx.addOutput({
+				script: inscriptionTxCtxData.revealTxPrevOutput.pkScript,
+				value: inscriptionTxCtxData.revealTxPrevOutput.value,
+			});
 		});
 
 		const changePkScript = bitcoin.address.toOutputScript(changeAddress, network);
-		tx.addOutput(changePkScript, 0);
+		const tx_clone = tx.clone();
+		tx_clone.addOutput({
+			script: changePkScript,
+			value: 0,
+		});
 
-		const txForEstimate = tx.clone();
-		signTx(txForEstimate, commitTxPrevOutputList, this.network);
+		const txEstimateSize = transactionBytes(tx_clone.data.inputs, tx_clone.txOutputs);
 
-		const fee = Math.floor(txForEstimate.virtualSize() * commitFeeRate);
+		const fee = Math.floor(txEstimateSize * commitFeeRate);
 		const changeAmount = totalSenderAmount - totalRevealPrevOutputValue - fee;
 		if (changeAmount >= minChangeValue) {
-			tx.outs[tx.outs.length - 1].value = changeAmount;
+			tx.addOutput({
+				script: changePkScript,
+				value: changeAmount,
+			});
 		} else {
-			tx.outs = tx.outs.slice(0, tx.outs.length - 1);
-			txForEstimate.outs = txForEstimate.outs.slice(0, txForEstimate.outs.length - 1);
-			const feeWithoutChange = Math.floor(txForEstimate.virtualSize() * commitFeeRate);
+			const new_txEstimateSize = transactionBytes(tx.data.inputs, tx.txOutputs);
+
+			const feeWithoutChange = Math.floor(new_txEstimateSize * commitFeeRate);
 			if (totalSenderAmount - totalRevealPrevOutputValue - feeWithoutChange < 0) {
 				this.mustCommitTxFee = fee;
 				return true;
@@ -226,42 +243,41 @@ export class InscriptionTool {
 		return false;
 	}
 
-	signCommitTx(commitTxPrevOutputList: PrevOutput[]) {
-		signTx(this.commitTx, commitTxPrevOutputList, this.network);
-	}
+	// signCommitTx(commitTxPrevOutputList: PrevOutput[]) {
+	// 	signTx(this.commitTx, commitTxPrevOutputList, this.network);
+	// }
 
 	completeRevealTx() {
 		this.revealTxs.forEach((revealTx, i) => {
-			revealTx.ins[0].hash = this.commitTx.getHash();
-
-			const prevOutScripts = [this.inscriptionTxCtxDataList[i].revealTxPrevOutput.pkScript];
-			const values = [this.inscriptionTxCtxDataList[i].revealTxPrevOutput.value];
-
+			revealTx.txInputs[0].hash = this.commitTx.extractTransaction().getHash();
 			this.revealTxPrevOutputFetcher.push(
 				this.inscriptionTxCtxDataList[i].revealTxPrevOutput.value
 			);
 
-			const hash = revealTx.hashForWitnessV1(
-				0,
-				prevOutScripts,
-				values,
-				bitcoin.Transaction.SIGHASH_DEFAULT,
-				this.inscriptionTxCtxDataList[i].hash
-			);
-			const signature = Buffer.from(
-				schnorr.sign(
-					hash,
-					this.inscriptionTxCtxDataList[i].privateKey,
-					base.randomBytes(32)
-				)
-			);
-			revealTx.ins[0].witness = [
-				Buffer.from(signature),
-				...this.inscriptionTxCtxDataList[i].witness,
-			];
+			// const prevOutScripts = [this.inscriptionTxCtxDataList[i].revealTxPrevOutput.pkScript];
+			// const values = [this.inscriptionTxCtxDataList[i].revealTxPrevOutput.value];
+
+			// const hash = revealTx.hashForWitnessV1(
+			// 	0,
+			// 	prevOutScripts,
+			// 	values,
+			// 	bitcoin.Transaction.SIGHASH_DEFAULT,
+			// 	this.inscriptionTxCtxDataList[i].hash
+			// );
+			// const signature = Buffer.from(
+			// 	schnorr.sign(
+			// 		hash,
+			// 		this.inscriptionTxCtxDataList[i].privateKey,
+			// 		base.randomBytes(32)
+			// 	)
+			// );
+			// revealTx.ins[0].witness = [
+			// 	Buffer.from(signature),
+			// 	...this.inscriptionTxCtxDataList[i].witness,
+			// ];
 
 			// check tx max tx wight
-			const revealWeight = revealTx.weight();
+			const revealWeight = revealTx.extractTransaction().weight();
 			if (revealWeight > maxStandardTxWeight) {
 				throw new Error(
 					`reveal(index ${i}) transaction weight greater than ${maxStandardTxWeight} (MAX_STANDARD_TX_WEIGHT): ${revealWeight}`
@@ -272,17 +288,17 @@ export class InscriptionTool {
 
 	calculateFee() {
 		let commitTxFee = 0;
-		this.commitTx.ins.forEach((_, i) => {
+		this.commitTx.extractTransaction().ins.forEach((_, i) => {
 			commitTxFee += this.commitTxPrevOutputFetcher[i];
 		});
-		this.commitTx.outs.forEach((out) => {
+		this.commitTx.extractTransaction().outs.forEach((out) => {
 			commitTxFee -= out.value;
 		});
 		const revealTxFees: number[] = [];
 		this.revealTxs.forEach((revealTx, i) => {
 			let revealTxFee = 0;
 			revealTxFee += this.revealTxPrevOutputFetcher[i];
-			revealTxFee -= revealTx.outs[0].value;
+			revealTxFee -= revealTx.extractTransaction().outs[0].value;
 			revealTxFees.push(revealTxFee);
 		});
 
@@ -293,72 +309,72 @@ export class InscriptionTool {
 	}
 }
 
-function signTx(
-	tx: bitcoin.Transaction,
-	commitTxPrevOutputList: PrevOutput[],
-	network: bitcoin.Network
-) {
-	tx.ins.forEach((input, i) => {
-		const addressType = getAddressType(commitTxPrevOutputList[i].address, network);
-		const privateKey = commitTxPrevOutputList[i].keyPairs.privateKey;
-		const privateKeyHex = base.toHex(privateKey!);
-		const publicKey = commitTxPrevOutputList[i].keyPairs.publicKey;
+// function signTx(
+// 	tx: bitcoin.Transaction,
+// 	commitTxPrevOutputList: PrevOutput[],
+// 	network: bitcoin.Network
+// ) {
+// 	tx.ins.forEach((input, i) => {
+// 		const addressType = getAddressType(commitTxPrevOutputList[i].address, network);
+// 		const privateKey = commitTxPrevOutputList[i].keyPairs.privateKey;
+// 		const privateKeyHex = base.toHex(privateKey!);
+// 		const publicKey = commitTxPrevOutputList[i].keyPairs.publicKey;
 
-		if (addressType === "segwit_taproot") {
-			const prevOutScripts = commitTxPrevOutputList.map((o) =>
-				bitcoin.address.toOutputScript(o.address, network)
-			);
-			const values = commitTxPrevOutputList.map((o) => o.amount);
-			const hash = tx.hashForWitnessV1(
-				i,
-				prevOutScripts,
-				values,
-				bitcoin.Transaction.SIGHASH_DEFAULT
-			);
-			const tweakedPrivKey = taproot.taprootTweakPrivKey(privateKey!);
-			const signature = Buffer.from(schnorr.sign(hash, tweakedPrivKey, base.randomBytes(32)));
+// 		if (addressType === "segwit_taproot") {
+// 			const prevOutScripts = commitTxPrevOutputList.map((o) =>
+// 				bitcoin.address.toOutputScript(o.address, network)
+// 			);
+// 			const values = commitTxPrevOutputList.map((o) => o.amount);
+// 			const hash = tx.hashForWitnessV1(
+// 				i,
+// 				prevOutScripts,
+// 				values,
+// 				bitcoin.Transaction.SIGHASH_DEFAULT
+// 			);
+// 			const tweakedPrivKey = taproot.taprootTweakPrivKey(privateKey!);
+// 			const signature = Buffer.from(schnorr.sign(hash, tweakedPrivKey, base.randomBytes(32)));
 
-			input.witness = [Buffer.from(signature)];
-		} else if (addressType === "legacy") {
-			const prevScript = bitcoin.address.toOutputScript(
-				commitTxPrevOutputList[i].address,
-				network
-			);
-			const hash = tx.hashForSignature(i, prevScript, bitcoin.Transaction.SIGHASH_ALL)!;
-			const signature = sign(hash, privateKeyHex);
-			const payment = bitcoin.payments.p2pkh({
-				signature: bitcoin.script.signature.encode(
-					signature,
-					bitcoin.Transaction.SIGHASH_ALL
-				),
-				pubkey: publicKey,
-			});
+// 			input.witness = [Buffer.from(signature)];
+// 		} else if (addressType === "legacy") {
+// 			const prevScript = bitcoin.address.toOutputScript(
+// 				commitTxPrevOutputList[i].address,
+// 				network
+// 			);
+// 			const hash = tx.hashForSignature(i, prevScript, bitcoin.Transaction.SIGHASH_ALL)!;
+// 			const signature = sign(hash, privateKeyHex);
+// 			const payment = bitcoin.payments.p2pkh({
+// 				signature: bitcoin.script.signature.encode(
+// 					signature,
+// 					bitcoin.Transaction.SIGHASH_ALL
+// 				),
+// 				pubkey: publicKey,
+// 			});
 
-			input.script = payment.input!;
-		} else {
-			const pubKeyHash = bcrypto.hash160(publicKey);
-			const prevOutScript = Buffer.of(0x19, 0x76, 0xa9, 0x14, ...pubKeyHash, 0x88, 0xac);
-			const value = commitTxPrevOutputList[i].amount;
-			const hash = tx.hashForWitness(
-				i,
-				prevOutScript,
-				value,
-				bitcoin.Transaction.SIGHASH_ALL
-			);
-			const signature = sign(hash, privateKeyHex);
+// 			input.script = payment.input!;
+// 		} else {
+// 			const pubKeyHash = bcrypto.hash160(publicKey);
+// 			const prevOutScript = Buffer.of(0x19, 0x76, 0xa9, 0x14, ...pubKeyHash, 0x88, 0xac);
+// 			const value = commitTxPrevOutputList[i].amount;
+// 			const hash = tx.hashForWitness(
+// 				i,
+// 				prevOutScript,
+// 				value,
+// 				bitcoin.Transaction.SIGHASH_ALL
+// 			);
+// 			const signature = sign(hash, privateKeyHex);
 
-			input.witness = [
-				bitcoin.script.signature.encode(signature, bitcoin.Transaction.SIGHASH_ALL),
-				publicKey,
-			];
+// 			input.witness = [
+// 				bitcoin.script.signature.encode(signature, bitcoin.Transaction.SIGHASH_ALL),
+// 				publicKey,
+// 			];
 
-			const redeemScript = Buffer.of(0x16, 0, 20, ...pubKeyHash);
-			if (addressType === "segwit_nested") {
-				input.script = redeemScript;
-			}
-		}
-	});
-}
+// 			const redeemScript = Buffer.of(0x16, 0, 20, ...pubKeyHash);
+// 			if (addressType === "segwit_nested") {
+// 				input.script = redeemScript;
+// 			}
+// 		}
+// 	});
+// }
 
 function createInscriptionTxCtxData(
 	network: bitcoin.Network,

@@ -453,7 +453,7 @@ function App() {
 		console.log("reveal tx res", revealRes);
 	};
 	return (
-		<div className="">
+		<div>
 			{connected ? (
 				<div className="flex gap-2 place-content-center">
 					<Button
@@ -491,7 +491,13 @@ function App() {
 					value={content}
 					onChange={(e) => setContent(e.currentTarget.value)}
 				/>
-				<Button onClick={onSendBuzz}>Send Buzz</Button>
+				<Button
+					onClick={() => {
+						console.log(useNetwork);
+					}}
+				>
+					Send Buzz
+				</Button>
 			</div>
 
 			<div className="font-bold text-3xl mt-6">Buzz List</div>
